@@ -15,6 +15,7 @@ def harita_goster(m, height, key):
     components.html(m.get_root().render(), height=height)
 
 st.set_page_config(page_title="Saha Rota Paneli", layout="wide")
+st.markdown("<style>header {visibility:hidden}</style>", unsafe_allow_html=True)
 st.markdown("""
 <style>
   .block-container { padding-top: 2rem; padding-bottom: 1rem;
