@@ -191,15 +191,25 @@ with sekme1:
 
     gd = df[(df.employee==calisan)&(df.date==gun)].sort_values("stop_no")
     farm = (gd.stop_type=="Farm Visit").sum()
-    mola = "Var" if (gd.break_taken=="Yes").any() else "Yok"
     otel = gd.hotel.iloc[0] if len(gd) and pd.notna(gd.hotel.iloc[0]) else "-"
 
-    k1,k2,k3,k4,k5 = st.columns(5)
+    # Verimlilik: saha suresi / toplam gun suresi (%)
+    saha_dk  = gd["time_on_site"].fillna(0).sum()
+    yolcu_dk = gd["travel_min"].fillna(0).sum()
+    toplam_dk = saha_dk + yolcu_dk
+    verimlilik = f"%{int(round(saha_dk / toplam_dk * 100))}" if toplam_dk > 0 else "-"
+
+    k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Çiftlik ziyareti", int(farm))
     k2.metric("Gün başlangıcı",   gd.arrival.iloc[0] if len(gd) else "-")
     k3.metric("Gün bitişi",       gd.arrival.iloc[-1] if len(gd) else "-")
-    k4.metric("Öğle molası",      mola)
-    k5.metric("Konaklama",        otel)
+    with k4:
+        st.metric("Operasyon verimliliği", verimlilik)
+        st.markdown(
+            f"<span style='color:#aaa;font-size:11px'>"
+            f"{int(saha_dk)} dk saha / {int(toplam_dk)} dk toplam</span>",
+            unsafe_allow_html=True)
+    k5.metric("Konaklama", otel)
 
     detay = st.checkbox("Tüm detay sütunlarını göster", value=False, key="g_detay")
     st.divider()
