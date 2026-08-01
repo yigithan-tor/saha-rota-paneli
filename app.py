@@ -23,7 +23,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Veri ──────────────────────────────────────────────────────
-@st.cache_data
+@st.cache_data(ttl=0)
 def veriyi_yukle():
     con = sqlite3.connect("routes.db")
     df = pd.read_sql("SELECT * FROM routes", con)
