@@ -1,6 +1,6 @@
 """
-Excel ciktisini SQLite'a yukler + her tarlaya bolge (kume) atar.
-Kullanim:  python load_to_db.py optimized_151_25_days_with_sum.xlsx
+Excel ciktisini SQLite'a yukler + her tarlaya ve otele bolge (kume) atar.
+Kullanim:  python load_to_db.py route_data.xlsx
 Cikti:     routes.db  (Streamlit uygulamasinin okudugu dosya)
 
 Bolge mantigi:
@@ -8,6 +8,8 @@ Bolge mantigi:
 - Her kumenin merkezi (ortalama koordinat) hangi il sinirindaysa o ilin adini alir.
 - Ayni ilde birden fazla kume varsa numaralanir (Balikesir 1, Balikesir 2).
 - 3'ten az tarlasi olan kume "(outlier)" olarak etiketlenir.
+- Oteller ayri kumelenmez: her otel, koordinat olarak en yakin ciftligin
+  bolgesine atanir (o ciftligin ait oldugu kumeyi devralir).
 """
 import sys
 import sqlite3
@@ -16,6 +18,7 @@ import numpy as np
 import pandas as pd
 from collections import Counter
 from sklearn.cluster import DBSCAN
+from sklearn.neighbors import BallTree
 from shapely.geometry import Point, shape
 
 SRC = sys.argv[1] if len(sys.argv) > 1 else "route_data.xlsx"
@@ -37,33 +40,34 @@ df.columns = [
 ]
 df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
 
-# ── 2. Bolge hesabi (sadece ciftlikler uzerinden) ─────────────
-def bolgeleri_hesapla(df):
-    farms = (df[df.stop_type == "Farm Visit"][["location", "latitude", "longitude"]]
-             .drop_duplicates().dropna().reset_index(drop=True))
-    if len(farms) == 0:
+# ── 2. Bolge hesabi ─────────────────────────────────────────────
+# Il sinirlarini bir kez yukle (sadece ciftlik kumelemesinde kullanilir;
+# oteller kendi il tespiti yapmaz, en yakin ciftligin bolgesini devralir)
+gj = json.load(open(IL_SINIRLARI, encoding="utf-8"))
+iller = [(f["properties"]["name"], shape(f["geometry"])) for f in gj["features"]]
+
+def il_bul(lat, lon):
+    p = Point(lon, lat)
+    for name, geom in iller:
+        if geom.contains(p):
+            return name
+    return "Bilinmeyen"
+
+def bolge_kumele(noktalar):
+    """noktalar: essiz ['id','latitude','longitude'] satirlari.
+    DBSCAN (50 km, haversine) + il siniri kontroluyle her id'ye bolge adi atar."""
+    if len(noktalar) == 0:
         return {}
 
-    # DBSCAN — 50 km esikli, haversine metrigi (radyan)
-    coords = np.radians(farms[["latitude", "longitude"]].values)
+    coords = np.radians(noktalar[["latitude", "longitude"]].values)
     db = DBSCAN(eps=ESIK_KM / 6371.0, min_samples=1,
                 metric="haversine").fit(coords)
-    farms["k"] = db.labels_
-
-    # Il sinirlarini yukle
-    gj = json.load(open(IL_SINIRLARI, encoding="utf-8"))
-    iller = [(f["properties"]["name"], shape(f["geometry"])) for f in gj["features"]]
-
-    def il_bul(lat, lon):
-        p = Point(lon, lat)
-        for name, geom in iller:
-            if geom.contains(p):
-                return name
-        return "Bilinmeyen"
+    noktalar = noktalar.copy()
+    noktalar["k"] = db.labels_
 
     # Her kume: il + boyut
     kume = {}
-    for k, g in farms.groupby("k"):
+    for k, g in noktalar.groupby("k"):
         kume[k] = {"il": il_bul(g.latitude.mean(), g.longitude.mean()),
                    "boyut": len(g)}
 
@@ -83,13 +87,40 @@ def bolgeleri_hesapla(df):
             ad += " (outlier)"
         kume[k]["ad"] = ad
 
-    # tarla -> bolge adi eslemesi
-    return {row.location: kume[row.k]["ad"] for row in farms.itertuples()}
+    # id -> bolge adi eslemesi
+    return {row.id: kume[row.k]["ad"] for row in noktalar.itertuples()}
 
-tarla_bolge = bolgeleri_hesapla(df)
+def en_yakin_ciftlik_bolgesi(noktalar, farms, tarla_bolge):
+    """noktalar: essiz ['id','latitude','longitude'] satirlari (ornegin oteller).
+    Ayri kumeleme yapmaz — her noktayi, koordinat olarak en yakin ciftligin
+    zaten atanmis oldugu bolgeye baglar."""
+    if len(noktalar) == 0 or len(farms) == 0:
+        return {}
 
-# Her satira bolge yaz (ciftlik degilse bos)
-df["bolge"] = df["location"].map(tarla_bolge).fillna("")
+    agac = BallTree(np.radians(farms[["latitude", "longitude"]].values),
+                     metric="haversine")
+    _, idx = agac.query(np.radians(noktalar[["latitude", "longitude"]].values), k=1)
+    en_yakin_ciftlik = farms["id"].values[idx[:, 0]]
+    return {row.id: tarla_bolge[loc]
+            for row, loc in zip(noktalar.itertuples(), en_yakin_ciftlik)}
+
+farms = (df[df.stop_type == "Farm Visit"][["location", "latitude", "longitude"]]
+         .drop_duplicates().dropna().reset_index(drop=True)
+         .rename(columns={"location": "id"}))
+tarla_bolge = bolge_kumele(farms)
+
+hotels = (df[df.location == "Hotel"][["hotel", "latitude", "longitude"]]
+          .drop_duplicates().dropna().reset_index(drop=True)
+          .rename(columns={"hotel": "id"}))
+otel_bolge = en_yakin_ciftlik_bolgesi(hotels, farms, tarla_bolge)
+
+# Her satira bolge yaz: ciftlik -> tarla_bolge, otel durak -> otel_bolge, digerleri bos
+df["bolge"] = ""
+df.loc[df.stop_type == "Farm Visit", "bolge"] = \
+    df.loc[df.stop_type == "Farm Visit", "location"].map(tarla_bolge)
+df.loc[df.location == "Hotel", "bolge"] = \
+    df.loc[df.location == "Hotel", "hotel"].map(otel_bolge)
+df["bolge"] = df["bolge"].fillna("")
 
 # ── 3. SQLite'a yaz ───────────────────────────────────────────
 con = sqlite3.connect(DB)
@@ -100,6 +131,11 @@ con.close()
 print(f"Yuklendi: {len(df)} satir -> {DB} (tablo: routes)")
 if tarla_bolge:
     ozet = pd.Series(tarla_bolge).value_counts()
-    print("Bolgeler:")
+    print("Ciftlik bolgeleri:")
     for ad, n in ozet.items():
         print(f"  {ad}: {n} tarla")
+if otel_bolge:
+    ozet = pd.Series(otel_bolge).value_counts()
+    print("Otel bolgeleri:")
+    for ad, n in ozet.items():
+        print(f"  {ad}: {n} otel")
