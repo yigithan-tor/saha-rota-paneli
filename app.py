@@ -32,7 +32,7 @@ def veriyi_yukle():
 
 df = veriyi_yukle()
 
-# ── (Not 3) Her personel icin SABIT renk ──────────────────────
+# ── Her personel icin sabit renk ──────────────────────────────
 PERSONEL_RENK = {
     "Berkcan": "#3b7dd8",   # mavi
     "Onur":    "#e07b39",   # turuncu
@@ -44,7 +44,7 @@ def personel_renk(p):
     idx = sorted(df.employee.unique()).index(p)
     return YEDEK_PALET[idx % len(YEDEK_PALET)]
 
-# (Not 1) home/otel dugumleri icin tek, notr renk
+# Home/otel dugumleri icin tek, notr renk
 DUGUM_RENK = "#3a3a3a"   # koyu gri — tum ev/otel noktalari ayni
 
 def gun_etiketi(day_type):
@@ -54,7 +54,7 @@ def gun_etiketi(day_type):
     if "End"       in day_type: return "trip · son"
     return ""
 
-# ── Numarali / harfli isaret ikonu (Not 4) ────────────────────
+# ── Numarali / harfli isaret ikonu ─────────────────────────────
 def daire_ikon(metin, arka_renk, cap=18, yazi=10):
     return folium.DivIcon(
         icon_size=(cap, cap), icon_anchor=(cap // 2, cap // 2),
@@ -75,20 +75,44 @@ def dugum_etiketi(satir):
     return "?"
 
 # ── Bir gunun rotasini haritaya cizer ────────────────────────
-def rota_ciz(harita, gun_df, cizgi_renk, tooltip_on=""):
+def rota_ciz(harita, gun_df, cizgi_renk, tooltip_on="", bolge_filtre=None):
     hd = gun_df.dropna(subset=["latitude", "longitude"]).sort_values("stop_no")
     if len(hd) == 0:
         return
+    if bolge_filtre is not None:
+        # bolge degeri bos olanlar (ev) her zaman kalir; Farm Visit ve otel
+        # duraklari (ikisi de routes.db'de kendi bolge degerine sahip)
+        # secili bolge listesine gore filtrelenir.
+        hd = hd[(hd.bolge == "") | (hd.bolge.isin(bolge_filtre))]
+        if len(hd) == 0:
+            return
 
     # Ince cizgi + uzerinde kucuk yon oklari
-    koord = list(zip(hd.latitude, hd.longitude))
-    pl = folium.PolyLine(koord, color=cizgi_renk, weight=2,
-                         opacity=0.85, tooltip=tooltip_on)
-    pl.add_to(harita)
-    PolyLineTextPath(
-        pl, "          \u25B6          ", repeat=True, center=False, offset=3,
-        attributes={"fill": cizgi_renk, "font-size": "7"},
-    ).add_to(harita)
+    if bolge_filtre is None:
+        segmentler = [hd]
+    else:
+        # Filtre yuzunden aradan cikan duraklar cizgiyi keser: sadece
+        # orijinal stop_no'su ardisik olan duraklar arasinda cizgi cizilir.
+        segmentler = []
+        stop_no = hd.stop_no.tolist()
+        baslangic = 0
+        for i in range(1, len(hd)):
+            if stop_no[i] - stop_no[i - 1] != 1:
+                segmentler.append(hd.iloc[baslangic:i])
+                baslangic = i
+        segmentler.append(hd.iloc[baslangic:])
+
+    for seg in segmentler:
+        if len(seg) < 2:
+            continue
+        koord = list(zip(seg.latitude, seg.longitude))
+        pl = folium.PolyLine(koord, color=cizgi_renk, weight=2,
+                             opacity=0.85, tooltip=tooltip_on)
+        pl.add_to(harita)
+        PolyLineTextPath(
+            pl, "          \u25B6          ", repeat=True, center=False, offset=3,
+            attributes={"fill": cizgi_renk, "font-size": "7"},
+        ).add_to(harita)
 
     # Ziyaretin gun numarasi (ay icindeki gun) — "2026-06-06" -> 6
     gun_no = int(str(hd.date.iloc[0]).split("-")[2])
@@ -96,14 +120,14 @@ def rota_ciz(harita, gun_df, cizgi_renk, tooltip_on=""):
     # Isaretler
     for _, s in hd.iterrows():
         if s.stop_type == "Farm Visit":
-            # (Not 4) Sayi = ziyaretin gerceklestigi gun (ay icindeki)
+            # Sayi = ziyaretin gerceklestigi gun (ay icindeki)
             folium.Marker(
                 [s.latitude, s.longitude],
                 icon=daire_ikon(gun_no, cizgi_renk),
                 tooltip=f"{tooltip_on}{s.stop_no}. {s.location} ({s.arrival})",
             ).add_to(harita)
         else:
-            # (Not 1 + 4) Ev/otel: tek renk, P veya otel kodu
+            # Ev/otel: tek renk, P veya otel kodu
             etiket = dugum_etiketi(s)
             folium.Marker(
                 [s.latitude, s.longitude],
@@ -112,12 +136,25 @@ def rota_ciz(harita, gun_df, cizgi_renk, tooltip_on=""):
             ).add_to(harita)
 
 @st.cache_data
+def hafta_haritasi():
+    tarihler = pd.to_datetime(sorted(df.date.unique()))
+    iso = tarihler.isocalendar()
+    haftalar = {}
+    for n, wk in enumerate(sorted(set(iso.week)), start=1):
+        gunler = [t for t, w in zip(tarihler, iso.week) if w == wk]
+        haftalar[wk] = f"Hafta {n} ({min(gunler).strftime('%d')}–{max(gunler).strftime('%d')} Haz)"
+    return {t.strftime("%Y-%m-%d"): haftalar[w] for t, w in zip(tarihler, iso.week)}
+
+HAFTA = hafta_haritasi()
+
+@st.cache_data
 def gun_ozeti():
     rows = []
     for _, g in df[["employee","date"]].drop_duplicates().iterrows():
         gd = df[(df.employee==g.employee)&(df.date==g.date)].sort_values("stop_no")
         rows.append({
             "employee": g.employee, "date": g.date,
+            "hafta":  HAFTA.get(g.date, ""),
             "tag":   gun_etiketi(gd.day_type.iloc[0]),
             "farms": int((gd.stop_type=="Farm Visit").sum()),
             "start": gd.arrival.iloc[0], "end": gd.arrival.iloc[-1],
@@ -134,7 +171,10 @@ for personel in df.employee.unique():
             st.session_state[k] = True
 
 def toggle_all(personel):
+    secili_haftalar = st.session_state.get("hafta_filtre", None)
     p_gunler = sorted(df[df.employee==personel].date.unique())
+    if secili_haftalar:
+        p_gunler = [g for g in p_gunler if HAFTA.get(g) in secili_haftalar]
     hepsi = all(st.session_state.get(f"cb_{personel}_{g}", True) for g in p_gunler)
     for g in p_gunler:
         st.session_state[f"cb_{personel}_{g}"] = not hepsi
@@ -212,12 +252,33 @@ with sekme1:
 with sekme2:
     st.caption("Yönetim ve test için: günleri seçip haritada üst üste görüntüleyin.")
 
+    # Hafta filtresi + Bölge Analizi
+    tum_haftalar = sorted(set(OZET.hafta), key=lambda h: int(h.split()[1]))
+    hf1, hf2 = st.columns([3, 1])
+    with hf1:
+        secili_haftalar = st.multiselect(
+            "Hafta filtresi", tum_haftalar, default=tum_haftalar,
+            key="hafta_filtre",
+            help="Sadece seçili haftaların günleri panelde ve haritada görünür.")
+    with hf2:
+        bolge_analizi = st.toggle(
+            "Bölge Analizi", key="bolge_analizi",
+            help="Açıkken sadece seçili bölgelerdeki çiftlikler haritada gösterilir.")
+
+    bolge_filtre = None
+    if bolge_analizi:
+        tum_bolgeler = sorted(b for b in df.bolge.unique() if isinstance(b, str) and b)
+        bolge_filtre = st.multiselect(
+            "Bölge filtresi", tum_bolgeler, default=tum_bolgeler,
+            key="bolge_filtre")
+
     sidebar, harita_alan = st.columns([1, 4])
     secili = []
 
     with sidebar:
         for personel in sorted(df.employee.unique()):
-            p_ozet   = OZET[OZET.employee==personel].sort_values("date")
+            p_ozet   = OZET[(OZET.employee==personel) &
+                            (OZET.hafta.isin(secili_haftalar))].sort_values("date")
             p_gunler = sorted(df[df.employee==personel].date.unique())
             p_renk   = personel_renk(personel)
 
@@ -266,12 +327,17 @@ with sekme2:
                                zoom_start=7)
                 for (p, g) in secili:
                     rota_ciz(m, df[(df.employee==p)&(df.date==g)],
-                             personel_renk(p), tooltip_on=f"{p} {g} — ")
+                             personel_renk(p), tooltip_on=f"{p} {g} — ",
+                             bolge_filtre=bolge_filtre)
                 harita_goster(m, height=760, key="genel_map")
                 lejand()
-                toplam = sum(
-                    (df[(df.employee==p)&(df.date==g)].stop_type=="Farm Visit").sum()
-                    for p,g in secili)
+                def _gun_ziyaret(p, g):
+                    gd = df[(df.employee==p)&(df.date==g)]
+                    farm = gd[gd.stop_type=="Farm Visit"]
+                    if bolge_filtre is not None:
+                        farm = farm[farm.bolge.isin(bolge_filtre)]
+                    return len(farm)
+                toplam = sum(_gun_ziyaret(p, g) for p, g in secili)
                 st.caption(f"Gösterilen: {len(secili)} gün · {int(toplam)} çiftlik ziyareti")
 
 # ═══════════════════════════════════════════════════════════════
