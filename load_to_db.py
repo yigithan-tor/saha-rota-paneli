@@ -109,17 +109,25 @@ farms = (df[df.stop_type == "Farm Visit"][["location", "latitude", "longitude"]]
          .rename(columns={"location": "id"}))
 tarla_bolge = bolge_kumele(farms)
 
+def _otel_anahtari(hotel, lat, lon):
+    """'hotel' kodu (orn. H001) tek basina essiz degildir — ayni kod farkli
+    koordinatlarda (hatta bazen personel evinde) tekrar kullanilabiliyor.
+    Kod + koordinat bilesimini anahtar yaparak her fiziksel noktayi ayirt ederiz."""
+    return hotel.astype(str) + "@" + lat.round(6).astype(str) + "," + lon.round(6).astype(str)
+
 hotels = (df[df.location == "Hotel"][["hotel", "latitude", "longitude"]]
-          .drop_duplicates().dropna().reset_index(drop=True)
-          .rename(columns={"hotel": "id"}))
+          .drop_duplicates().dropna().reset_index(drop=True))
+hotels["id"] = _otel_anahtari(hotels.hotel, hotels.latitude, hotels.longitude)
 otel_bolge = en_yakin_ciftlik_bolgesi(hotels, farms, tarla_bolge)
 
 # Her satira bolge yaz: ciftlik -> tarla_bolge, otel durak -> otel_bolge, digerleri bos
 df["bolge"] = ""
 df.loc[df.stop_type == "Farm Visit", "bolge"] = \
     df.loc[df.stop_type == "Farm Visit", "location"].map(tarla_bolge)
-df.loc[df.location == "Hotel", "bolge"] = \
-    df.loc[df.location == "Hotel", "hotel"].map(otel_bolge)
+otel_maske = df.location == "Hotel"
+df.loc[otel_maske, "bolge"] = _otel_anahtari(
+    df.loc[otel_maske, "hotel"], df.loc[otel_maske, "latitude"], df.loc[otel_maske, "longitude"]
+).map(otel_bolge)
 df["bolge"] = df["bolge"].fillna("")
 
 # ── 3. SQLite'a yaz ───────────────────────────────────────────
